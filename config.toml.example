@@ -98,6 +98,10 @@ POLLING_BACKOFF_MULTIPLIER = 2.0
 POLLING_STARTUP_JITTER_SECONDS = 30.0
 POLLING_JITTER_RATIO = 0.5
 STALE_SESSION_TIMEOUT_MINUTES = 5
+# Minimum (jittered) spacing between stale-work-unit cleanup runs per instance.
+# Staleness is a minutes-timescale condition, so cleanup doesn't need to run on
+# every seconds-scale poll (0.0 = run every poll, legacy behavior).
+STALE_WORK_UNIT_CLEANUP_INTERVAL_SECONDS = 60.0
 # QUEUE_ERROR_RETENTION_SECONDS = 2592000  # 30 days
 DEDUPLICATE = true
 LOG_OBSERVATIONS = false
@@ -105,6 +109,7 @@ MAX_INPUT_TOKENS = 25000
 MAX_CUSTOM_INSTRUCTIONS_TOKENS = 2000
 WORKING_REPRESENTATION_MAX_OBSERVATIONS = 100
 REPRESENTATION_BATCH_MAX_TOKENS = 1024
+REPRESENTATION_BATCH_MAX_AGE_SECONDS = 1800
 FLUSH_ENABLED = false  # Bypass batch token threshold, process work immediately
 
 [deriver.model_config]

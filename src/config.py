@@ -69,7 +69,23 @@ class ModelOverrideSettings(BaseModel):
     api_key_env: str | None = None
     base_url: str | None = None
 
-    provider_params: dict[str, Any] = Field(default_factory=dict)
+    provider_params: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Operator escape hatch for provider-specific request fields. "
+            "Three recognized keys: `extra_body` (merged into the request body), "
+            "`extra_headers` (HTTP headers), `extra_query` (URL query params). "
+            "OpenAI and Anthropic transports forward these as identically-named "
+            "SDK kwargs. The Gemini transport merges `extra_body` into the "
+            "GenerateContentConfig dict and folds `extra_headers` into "
+            "`http_options.headers`; `extra_query` is unsupported. Shallow merge "
+            "with operator-wins — if Honcho and the operator both set the same "
+            "key inside `extra_body`, the operator's value replaces Honcho's. "
+            "Operators are responsible for picking a coherent combination of "
+            "this and other config (e.g. unset `thinking_budget_tokens` when "
+            "supplying an `extra_body.thinking` for Anthropic-via-proxy)."
+        ),
+    )
 
 
 class PromptCachePolicy(BaseModel):
@@ -704,6 +720,9 @@ class EmbeddingSettings(HonchoSettings):
     VECTOR_DIMENSIONS: Annotated[int, Field(default=1536, gt=0)] = 1536
     MAX_INPUT_TOKENS: Annotated[int, Field(default=8192, gt=0)] = 8192
     MAX_TOKENS_PER_REQUEST: Annotated[int, Field(default=300_000, gt=0)] = 300_000
+    # Caps concurrent message-embedding fan-out on the API request path (the
+    # immediate-embed background task). The reconciler is unaffected.
+    MAX_CONCURRENT_EMBEDDINGS: Annotated[int, Field(default=10, gt=0, le=100)] = 10
 
     @model_validator(mode="before")
     @classmethod
@@ -769,6 +788,10 @@ class DeriverSettings(HonchoSettings):
     # to 0.0 to disable.
     POLLING_JITTER_RATIO: Annotated[float, Field(default=0.5, ge=0.0, le=1.0)] = 0.5
     STALE_SESSION_TIMEOUT_MINUTES: Annotated[int, Field(default=5, gt=0, le=1440)] = 5
+    # Minimum (jittered) spacing between stale-work-unit cleanup runs
+    STALE_WORK_UNIT_CLEANUP_INTERVAL_SECONDS: Annotated[
+        float, Field(default=60.0, ge=0.0, le=3600.0)
+    ] = 60.0
 
     # Retention window (seconds) for keeping errored items in the queue
     QUEUE_ERROR_RETENTION_SECONDS: Annotated[
@@ -807,6 +830,11 @@ class DeriverSettings(HonchoSettings):
         int,
         Field(default=1024, ge=128, le=16_384),
     ] = 1024
+    # Sub-threshold work units become eligible once their oldest unprocessed
+    # item exceeds this age. 0 disables age-based flushing.
+    REPRESENTATION_BATCH_MAX_AGE_SECONDS: Annotated[int, Field(default=1800, ge=0)] = (
+        1800
+    )
 
     # When enabled, bypasses the batch token threshold and processes work immediately
     FLUSH_ENABLED: bool = False
@@ -1304,6 +1332,13 @@ class AppSettings(HonchoSettings):
     EMBED_MESSAGES: bool = True
     LANGFUSE_HOST: str | None = None
     LANGFUSE_PUBLIC_KEY: str | None = None
+
+    # Origins allowed by the FastAPI CORSMiddleware
+    CORS_ORIGINS: list[str] = [
+        "http://localhost",
+        "http://127.0.0.1:8000",
+        "https://api.honcho.dev",
+    ]
 
     COLLECT_METRICS_LOCAL: bool = False
     LOCAL_METRICS_FILE: str = "metrics.jsonl"

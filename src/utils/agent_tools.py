@@ -1302,6 +1302,15 @@ async def _handle_create_observations_impl(
     if not raw_observations:
         return "ERROR: observations list is empty"
 
+    # Some models emit observations as bare strings (or a single string) instead
+    # of {"content": ...} dicts; normalize so level-stamping below can't crash.
+    if isinstance(raw_observations, str):
+        raw_observations = [raw_observations]
+    raw_observations = [
+        obs if isinstance(obs, dict) else {"content": str(obs)}
+        for obs in raw_observations
+    ]
+
     # Set context-specific default level before Pydantic validation
     default_level = "explicit" if ctx.current_messages else "deductive"
     for obs in raw_observations:

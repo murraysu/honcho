@@ -1290,6 +1290,22 @@ class ToolContext:
     parent_category: str | None = None  # Parent category for CloudEvents
 
 
+def _normalize_observation_id(obs_id: str) -> str:
+    """Strip the display-format ``id:`` prefix from a model-supplied observation ID.
+
+    Observations are presented to agents as ``[id:xxx]`` (see
+    ``Representation.str_with_ids``), and despite tool-schema instructions to
+    pass the bare ID, models sometimes copy the prefix verbatim. Since document
+    IDs are nanoids whose alphabet includes ``-`` and ``_``, only the ``id:``
+    prefix and surrounding whitespace are stripped — anything more aggressive
+    could mangle legitimate IDs.
+    """
+    obs_id = obs_id.strip()
+    if obs_id.lower().startswith("id:"):
+        obs_id = obs_id[3:]
+    return obs_id.strip()
+
+
 async def _handle_create_observations_impl(
     ctx: ToolContext,
     tool_input: dict[str, Any],
@@ -1318,7 +1334,15 @@ async def _handle_create_observations_impl(
             obs["level"] = forced_level
         else:
             obs.setdefault("level", default_level)
-
+        # Models sometimes copy the display-format "id:" prefix into source_ids;
+        # normalize so provenance links reference real document IDs.
+        source_ids = obs.get("source_ids")
+        if isinstance(source_ids, list):
+            normalized_source_ids: list[str] = []
+            for source_id in cast(list[Any], source_ids):
+                if isinstance(source_id, str):
+                    normalized_source_ids.append(_normalize_observation_id(source_id))
+            obs["source_ids"] = normalized_source_ids
     # Validate observations individually so valid ones are still processed
     observations: list[schemas.ObservationInput] = []
     validation_failures: list[ObservationFailure] = []
@@ -2212,6 +2236,7 @@ async def _handle_get_reasoning_chain(
     observation_id = tool_input.get("observation_id")
     if not observation_id:
         return "ERROR: 'observation_id' is required"
+    observation_id = _normalize_observation_id(observation_id)
 
     direction = tool_input.get("direction", "both")
     if direction not in ("premises", "conclusions", "both"):
@@ -2507,8 +2532,13 @@ def _begin_tool_observation(tool_name: str, tool_input: dict[str, Any]) -> Any:
     Auto-parents under the active step span (else standalone). Returns a handle
     (closed by `_finish_tool_observation`) or None when disabled/setup fails.
     All tools are ``as_type="tool"`` — they share one generic dispatcher.
+
+    Only fires in legacy *inline* mode. In exporter mode there's no live span
+    context to parent under, so this would emit a rootless tool trace per call;
+    the LangfuseExporter already projects tool spans (from ``output_tool_calls``)
+    nested under the step span, so a live observation here just double-emits.
     """
-    if not settings.LANGFUSE_PUBLIC_KEY:
+    if not settings.langfuse_inline_enabled:
         return None
     try:
         from langfuse import get_client

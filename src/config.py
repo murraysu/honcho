@@ -61,6 +61,10 @@ ThinkingEffortLevel = Literal[
     "none", "minimal", "low", "medium", "high", "xhigh", "max"
 ]
 
+# "json_object" injects the schema into the prompt for OpenAI-compatible
+# providers that don't support json_schema (Structured Outputs).
+StructuredOutputMode = Literal["json_schema", "json_object"]
+
 
 class ModelOverrideSettings(BaseModel):
     """Advanced module-level transport overrides."""
@@ -133,6 +137,23 @@ def _validate_thinking_constraints(
         raise ValueError("thinking_budget_tokens must be >= 1024 for Anthropic models")
 
 
+def _validate_structured_output_mode(
+    transport: ModelTransport, structured_output_mode: StructuredOutputMode | None
+) -> None:
+    """Reject ``structured_output_mode`` on transports that ignore it.
+
+    Only the OpenAI backend honors this setting (it controls the json_schema vs
+    json_object structured-output path). On the anthropic/gemini transports it is
+    a silent no-op, so a value set there is a misconfiguration — fail fast at
+    startup rather than letting the operator wonder why it has no effect.
+    """
+    if structured_output_mode is not None and transport != "openai":
+        raise ValueError(
+            "structured_output_mode is only supported on the 'openai' transport; "
+            + f"remove it from the '{transport}' model config"
+        )
+
+
 class FallbackModelSettings(BaseModel):
     """Independent fallback model configuration. No inheritance from primary."""
 
@@ -151,6 +172,8 @@ class FallbackModelSettings(BaseModel):
         validation_alias=AliasChoices("thinking_effort", "reasoning_effort"),
     )
     thinking_budget_tokens: int | None = None
+
+    structured_output_mode: StructuredOutputMode | None = None
 
     max_output_tokens: int | None = None
     stop_sequences: list[str] | None = None
@@ -171,6 +194,7 @@ class FallbackModelSettings(BaseModel):
     @model_validator(mode="after")
     def _validate_runtime_shape(self) -> "FallbackModelSettings":
         _validate_thinking_constraints(self.transport, self.thinking_budget_tokens)
+        _validate_structured_output_mode(self.transport, self.structured_output_mode)
         return self
 
 
@@ -195,6 +219,8 @@ class ConfiguredModelSettings(BaseModel):
     )
     thinking_budget_tokens: int | None = None
 
+    structured_output_mode: StructuredOutputMode | None = None
+
     max_output_tokens: int | None = None
     stop_sequences: list[str] | None = None
 
@@ -215,6 +241,7 @@ class ConfiguredModelSettings(BaseModel):
     @model_validator(mode="after")
     def _validate_runtime_shape(self) -> "ConfiguredModelSettings":
         _validate_thinking_constraints(self.transport, self.thinking_budget_tokens)
+        _validate_structured_output_mode(self.transport, self.structured_output_mode)
         return self
 
 
@@ -239,6 +266,7 @@ class ResolvedFallbackConfig(BaseModel):
         validation_alias=AliasChoices("thinking_effort", "reasoning_effort"),
     )
     thinking_budget_tokens: int | None = None
+    structured_output_mode: StructuredOutputMode | None = None
     provider_params: dict[str, Any] = Field(default_factory=dict)
 
     max_output_tokens: int | None = None
@@ -274,6 +302,7 @@ class ModelConfig(BaseModel):
         validation_alias=AliasChoices("thinking_effort", "reasoning_effort"),
     )
     thinking_budget_tokens: int | None = None
+    structured_output_mode: StructuredOutputMode | None = None
     provider_params: dict[str, Any] = Field(default_factory=dict)
 
     max_output_tokens: int | None = None
@@ -410,6 +439,7 @@ def _resolve_fallback_config(
         seed=fallback.seed,
         thinking_effort=fallback.thinking_effort,
         thinking_budget_tokens=fallback.thinking_budget_tokens,
+        structured_output_mode=fallback.structured_output_mode,
         provider_params=fallback.overrides.provider_params,
         max_output_tokens=fallback.max_output_tokens,
         stop_sequences=fallback.stop_sequences,
@@ -443,6 +473,7 @@ def resolve_model_config(configured: ConfiguredModelSettings) -> ModelConfig:
         seed=configured.seed,
         thinking_effort=configured.thinking_effort,
         thinking_budget_tokens=configured.thinking_budget_tokens,
+        structured_output_mode=configured.structured_output_mode,
         provider_params=configured.overrides.provider_params,
         max_output_tokens=configured.max_output_tokens,
         stop_sequences=configured.stop_sequences,
@@ -1145,6 +1176,19 @@ class TelemetrySettings(HonchoSettings):
     # that join high-volume events to aggregate envelopes first.
     HIGH_VOLUME_SAMPLE_RATE: Annotated[float, Field(default=1.0, ge=0.0, le=1.0)] = 1.0
 
+    # --- Full-fidelity payload tracing (llm.call.traced / trace.content) ---
+    # Master toggle for replay-grade content capture. Default-off.
+    TRACE_PAYLOADS_ENABLED: bool = False
+
+    # Per-message cap (bytes) for captured content; oversized string content is
+    # clipped (with a marker) and the call is flagged was_truncated.
+    TRACE_MAX_BYTES: Annotated[int, Field(default=262144, gt=0)] = 262144
+
+    # Allowlist of CallPurpose values to capture; empty = all. Typed as str to
+    # keep the enum out of config (validated against CallPurpose at the producer,
+    # same pattern as LLMTelemetryContext.call_purpose).
+    TRACE_PURPOSES: list[str] = Field(default_factory=list)
+
 
 class CacheSettings(HonchoSettings):
     model_config = SettingsConfigDict(env_prefix="CACHE_", extra="ignore")  # pyright: ignore
@@ -1314,6 +1358,17 @@ class VectorStoreSettings(HonchoSettings):
         return self
 
 
+class TraceViewerSettings(HonchoSettings):
+    model_config = SettingsConfigDict(env_prefix="TRACE_VIEWER_", extra="ignore")  # pyright: ignore
+
+    ENABLED: bool = False
+    HOST: str = "127.0.0.1"
+    PORT: int = 8002
+    STORAGE_DIR: str = "./traces"
+    MAX_REQUEST_BYTES: int = 10 * 1024 * 1024  # 10 MB
+    VENDOR_CDN_BASE: str = "https://cdn.jsdelivr.net/npm"
+
+
 class AppSettings(HonchoSettings):
     # No env_prefix for app-level settings
     model_config = SettingsConfigDict(  # pyright: ignore
@@ -1322,6 +1377,7 @@ class AppSettings(HonchoSettings):
 
     # Application-wide settings
     LOG_LEVEL: str = "INFO"
+    PERFORMANCE_LOG_FORMAT: str = "compact"
     SESSION_OBSERVERS_LIMIT: Annotated[int, Field(default=10, gt=0)] = 10
     MAX_FILE_SIZE: Annotated[int, Field(default=5_242_880, gt=0)] = 5_242_880  # 5MB
     GET_CONTEXT_MAX_TOKENS: Annotated[int, Field(default=100_000, gt=0, le=250_000)] = (
@@ -1332,6 +1388,29 @@ class AppSettings(HonchoSettings):
     EMBED_MESSAGES: bool = True
     LANGFUSE_HOST: str | None = None
     LANGFUSE_PUBLIC_KEY: str | None = None
+    # How Langfuse traces are produced:
+    #   "exporter" (default) — Langfuse is a projection over the captured
+    #     CapturedLLMCall stream (LangfuseExporter), the same source of truth as
+    #     the CloudEvents trace stream.
+    #   "inline" — legacy live instrumentation (@observe + propagate_attributes
+    #     spans during execution). Kept one release for side-by-side validation.
+    LANGFUSE_EXPORTER_MODE: Literal["inline", "exporter"] = "exporter"
+
+    @property
+    def langfuse_inline_enabled(self) -> bool:
+        """True when the legacy inline Langfuse instrumentation is active
+        (keys configured + ``LANGFUSE_EXPORTER_MODE == "inline"``)."""
+        return (
+            bool(self.LANGFUSE_PUBLIC_KEY) and self.LANGFUSE_EXPORTER_MODE == "inline"
+        )
+
+    @property
+    def langfuse_exporter_enabled(self) -> bool:
+        """True when the Langfuse exporter (a projection over the captured call
+        stream) is active (keys configured + ``LANGFUSE_EXPORTER_MODE == "exporter"``)."""
+        return (
+            bool(self.LANGFUSE_PUBLIC_KEY) and self.LANGFUSE_EXPORTER_MODE == "exporter"
+        )
 
     # Origins allowed by the FastAPI CORSMiddleware
     CORS_ORIGINS: list[str] = [
@@ -1362,6 +1441,7 @@ class AppSettings(HonchoSettings):
     CACHE: CacheSettings = Field(default_factory=CacheSettings)
     DREAM: DreamSettings = Field(default_factory=DreamSettings)
     VECTOR_STORE: VectorStoreSettings = Field(default_factory=VectorStoreSettings)
+    TRACE_VIEWER: TraceViewerSettings = Field(default_factory=TraceViewerSettings)
 
     @field_validator("LOG_LEVEL")
     def validate_log_level(cls, v: str) -> str:
@@ -1369,6 +1449,13 @@ class AppSettings(HonchoSettings):
         if log_level not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
             raise ValueError(f"Invalid log level: {v}")
         return log_level
+
+    @field_validator("PERFORMANCE_LOG_FORMAT")
+    def validate_performance_log_format(cls, v: str) -> str:
+        log_format = v.lower()
+        if log_format not in ["compact", "rich"]:
+            raise ValueError(f"Invalid performance log format: {v}")
+        return log_format
 
     @model_validator(mode="after")
     def propagate_namespace(self) -> "AppSettings":

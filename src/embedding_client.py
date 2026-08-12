@@ -151,6 +151,24 @@ def _publish_embedding_event(
         logger.debug("Failed to emit EmbeddingCallCompletedEvent", exc_info=True)
 
 
+def _e5_prefix(model: str, kind: str) -> str:
+    """Return the E5-family input prefix for `kind`, or "" for other models.
+
+    The E5 models (e.g. intfloat/multilingual-e5-large) require every input to
+    start with "query: " or "passage: ". Omitting the prefix does not raise —
+    it silently degrades retrieval quality, which is the worst kind of failure
+    to debug. Other model families have no such convention and prefixing them
+    would just pollute the input, so this is keyed off the model name rather
+    than applied unconditionally.
+
+    Local fork addition (2026-08-12): the deployment moved off BAAI/bge-m3 —
+    which needs no prefix — onto multilingual-e5-large.
+    """
+    if "e5" not in model.lower():
+        return ""
+    return "query: " if kind == "query" else "passage: "
+
+
 class BatchItem(NamedTuple):
     """A single item in a batch with its metadata."""
 
@@ -260,7 +278,12 @@ class _EmbeddingClient:
         openai_client = self.client
 
         async def _call_openai() -> list[float]:
-            openai_kwargs: dict[str, Any] = {"model": self.model, "input": [query]}
+            # Retrieval side: E5 wants the "query: " prefix here (no-op for
+            # other model families).
+            openai_kwargs: dict[str, Any] = {
+                "model": self.model,
+                "input": [_e5_prefix(self.model, "query") + query],
+            }
             if self.send_dimensions:
                 openai_kwargs["dimensions"] = self.vector_dimensions
             response = await openai_client.embeddings.create(**openai_kwargs)
@@ -460,9 +483,12 @@ class _EmbeddingClient:
                                 self._validate_embedding_dimensions(embedding.values)
                             )
             else:  # openai
+                # Indexing side: E5 wants the "passage: " prefix here (no-op
+                # for other model families).
+                _prefix = _e5_prefix(self.model, "passage")
                 openai_kwargs: dict[str, Any] = {
                     "model": self.model,
-                    "input": [item.text for item in batch],
+                    "input": [_prefix + item.text for item in batch],
                 }
                 if self.send_dimensions:
                     openai_kwargs["dimensions"] = self.vector_dimensions
